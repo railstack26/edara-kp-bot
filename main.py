@@ -193,7 +193,9 @@ def send_message(chat_id, text, reply_to=None):
     if reply_to:
         payload['reply_to_message_id'] = reply_to
     try:
-        requests.post(f'{TELEGRAM_API}/sendMessage', json=payload, timeout=10)
+        resp = requests.post(f'{TELEGRAM_API}/sendMessage', json=payload, timeout=10)
+        if not resp.ok:
+            print(f'sendMessage HTTP {resp.status_code}: {resp.text}')
     except Exception as e:
         print(f'sendMessage error: {e}')
 
@@ -308,12 +310,39 @@ def call_claude(system, messages):
         json={
             'model': 'anthropic/claude-3.7-sonnet',
             'max_tokens': 1800,
-            'messages': [{'role': 'system', 'content': system}] + messages
+            'messages': [
+                {'role': 'system', 'content': system},
+                *messages,
+            ]
         },
         timeout=30
     )
+
+    if not response.ok:
+        raise RuntimeError(f'OpenRouter HTTP {response.status_code}: {response.text}')
+
     data = response.json()
-    return data['choices'][0]['message']['content']
+    print('OpenRouter response:', data)
+
+    choices = data.get('choices') or []
+    if not choices:
+        raise RuntimeError(f'OpenRouter returned no choices: {data}')
+
+    message = choices[0].get('message') or {}
+    content = message.get('content')
+
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get('type') == 'text' and item.get('text'):
+                parts.append(item['text'])
+        if parts:
+            return '\n'.join(parts).strip()
+
+    raise RuntimeError(f'OpenRouter returned empty content: {data}')
 
 
 @app.route('/webhook', methods=['POST'])
@@ -323,12 +352,16 @@ def webhook():
     if not message:
         return jsonify({'ok': True})
 
+    print('Incoming update:', update)
+
     chat_id    = str(message['chat']['id'])
     text       = message.get('text', '').strip()
     message_id = message['message_id']
 
     if chat_id != str(CHAT_ID):
         return jsonify({'ok': True})
+
+    print(f'Accepted message from chat_id={chat_id}: {text}')
 
     lower = text.lower()
     is_translate = lower.startswith('перевод') or lower.startswith('кп')
@@ -369,6 +402,13 @@ def webhook():
         lines = text.split('\n')
         chinese_text = '\n'.join(lines[1:]).strip()
 
+        # Поддержка и многострочного, и однострочного формата вроде:
+        # "КП 1.提货费2500元 ..."
+        if not chinese_text:
+            parts = text.split(maxsplit=1)
+            if len(parts) > 1:
+                chinese_text = parts[1].strip()
+
         if not chinese_text:
             send_message(chat_id,
                 'Вставь текст от коллег после слова перевод или КП',
@@ -387,10 +427,18 @@ def webhook():
         send_message(chat_id, 'Считаю ставку и готовлю КП...', reply_to=message_id)
 
     try:
+        print('Original context:', original_context)
+        print('Chinese text:', chinese_text)
+        print('Clarification:', clarification)
+
         system, messages = build_messages(chinese_text, original_context, clarification)
+        print('Built messages:', messages)
+
         result = call_claude(system, messages)
+        print('Final result:', result)
         send_message(chat_id, result, reply_to=message_id)
     except Exception as e:
+        print('Webhook error:', repr(e))
         send_message(chat_id, f'Ошибка: {str(e)}', reply_to=message_id)
 
     return jsonify({'ok': True})
