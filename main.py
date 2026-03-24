@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from flask import Flask, request, jsonify
 
@@ -52,10 +53,12 @@ LCL и LTL:
   Пример: 132*13.6 + 150(bill) + 150(маржа) + 2500/6.9 = 1795+150+150+362 = 2457 -> 2500 USD
 
 КРИТИЧЕСКИ ВАЖНО ПРО ЗАБОР (提货费):
+  - Если в тексте коллег есть `提货费` и рядом указана сумма (например `提货费2500元`, `提货费 2500 RMB`, `1.提货费2500元`) — это ОБЯЗАТЕЛЬНО стоимость забора, её нужно включать в расчёт
   - 提货费 ВСЕГДА добавлять в расчёт - это НЕ входит в загранставку
+  - Никогда не писать "забор не указан", если в тексте есть `提货费` с суммой
   - Никогда не писать "забор включён в ставку коллег" - это ошибка
   - Формула: забор_CNY / курс = забор_USD -> добавить к итогу
-  - Если коллеги указали свой курс (например 6.96) - использовать его для расчёта забора
+  - Если коллеги указали свой курс (например `平台结算汇率6.96`) - использовать именно его для расчёта забора
   - Пример: 提货费 2500 CNY / 6.96 = 359 USD -> добавить к итогу
 
 FCL:
@@ -165,8 +168,13 @@ FCL FOB (разбивка FOR + pre carriage):
 === ПЕРЕВОД ===
 Тип: [LCL/LTL/FCL]
 Маршрут: [...]
-ETD: [...]
+ETD: [... или "не указан"]
 Расчёт: загран [...] + маржа 150 + забор [...] = итого [...]
+
+ПРИОРИТЕТ ЦИФР:
+- Если ниже в сообщении есть блок "СТРУКТУРИРОВАННЫЕ ДАННЫЕ ИЗ ТЕКСТА", считай его извлечением из оригинального китайского текста и используй эти цифры как обязательные для расчёта.
+- Если там указано `pickup_cny`, ты НЕ имеешь права писать, что забор не указан.
+- Если там указано `settlement_rate`, используй именно этот курс для пересчёта забора.
 
 === КП ===
 [готовое КП по шаблону]
@@ -190,26 +198,97 @@ def send_message(chat_id, text, reply_to=None):
         print(f'sendMessage error: {e}')
 
 
+
+def extract_pricing_hints(chinese_text):
+    """Пытается вытащить ключевые цифры из китайского текста до отправки в LLM."""
+    hints = {}
+
+    text = chinese_text or ''
+
+    # 提货费 / 国内提货费 / 提货
+    pickup_patterns = [
+        r'(?:国内)?提货费\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:元|RMB|CNY)',
+        r'(?:国内)?提货\s*费?\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:元|RMB|CNY)',
+    ]
+    for pattern in pickup_patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m:
+            hints['pickup_cny'] = float(m.group(1))
+            break
+
+    # 汇率 / 结算汇率 / 平台结算汇率
+    rate_patterns = [
+        r'平台结算汇率\s*[:：]?\s*(\d+(?:\.\d+)?)',
+        r'结算汇率\s*[:：]?\s*(\d+(?:\.\d+)?)',
+        r'汇率\s*[:：]?\s*(\d+(?:\.\d+)?)',
+    ]
+    for pattern in rate_patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m:
+            hints['settlement_rate'] = float(m.group(1))
+            break
+
+    # USD/CBM ставка
+    m = re.search(r'(\d+(?:\.\d+)?)\s*USD\s*/\s*CBM', text, flags=re.IGNORECASE)
+    if m:
+        hints['usd_per_cbm'] = float(m.group(1))
+
+    # bill charge, например +USD150/bill
+    m = re.search(r'\+\s*USD\s*(\d+(?:\.\d+)?)\s*/\s*bill', text, flags=re.IGNORECASE)
+    if m:
+        hints['bill_charge_usd'] = float(m.group(1))
+
+    # Грубое определение типа
+    if any(token in text for token in ['拼箱', '铁路拼箱', 'LCL']):
+        hints['transport_type_hint'] = 'LCL'
+    elif any(token in text for token in ['汽车拼箱', '散货', 'LTL']):
+        hints['transport_type_hint'] = 'LTL'
+    elif any(token in text for token in ['整箱', 'FCL', '40HQ', '40HC', '20GP']):
+        hints['transport_type_hint'] = 'FCL'
+
+    return hints
+
+
 def build_messages(chinese_text, original_context='', clarification=''):
     """Строит историю сообщений для Claude с учётом диалога."""
     system = SYSTEM_PROMPT.replace('курс_CNY', str(CNY_RATE))
+    pricing_hints = extract_pricing_hints(chinese_text)
 
     # Первое сообщение пользователя
     user_msg = ''
     if original_context:
         user_msg += f'КОНТЕКСТ ЗАПРОСА КЛИЕНТА:\n{original_context}\n\n'
+
+    if pricing_hints:
+        user_msg += 'СТРУКТУРИРОВАННЫЕ ДАННЫЕ ИЗ ТЕКСТА:\n'
+        if 'transport_type_hint' in pricing_hints:
+            user_msg += f'- transport_type_hint: {pricing_hints["transport_type_hint"]}\n'
+        if 'pickup_cny' in pricing_hints:
+            user_msg += f'- pickup_cny: {pricing_hints["pickup_cny"]}\n'
+        if 'settlement_rate' in pricing_hints:
+            user_msg += f'- settlement_rate: {pricing_hints["settlement_rate"]}\n'
+        if 'usd_per_cbm' in pricing_hints:
+            user_msg += f'- usd_per_cbm: {pricing_hints["usd_per_cbm"]}\n'
+        if 'bill_charge_usd' in pricing_hints:
+            user_msg += f'- bill_charge_usd: {pricing_hints["bill_charge_usd"]}\n'
+        user_msg += '\n'
+
+    user_msg += (
+        'ИНСТРУКЦИЯ: сначала опирайся на оригинальный китайский текст и на '
+        'СТРУКТУРИРОВАННЫЕ ДАННЫЕ ИЗ ТЕКСТА. Если pickup_cny уже извлечён, '
+        'нельзя писать, что забор не указан. Если settlement_rate извлечён, '
+        'используй именно его для расчёта забора.\n\n'
+    )
     user_msg += f'ОТВЕТ ОТ КИТАЙСКИХ КОЛЛЕГ:\n{chinese_text}'
 
     messages = [{'role': 'user', 'content': user_msg}]
 
     # Если есть уточнение (reply на вопрос бота) - добавляем как продолжение диалога
     if clarification:
-        # Добавляем ответ ассистента (он попросил уточнить)
         messages.append({
             'role': 'assistant',
             'content': '=== УТОЧНИ ===\nТребуются дополнительные данные для расчёта.'
         })
-        # Добавляем уточнение пользователя
         messages.append({
             'role': 'user',
             'content': f'Уточнение: {clarification}\n\nТеперь составь КП.'
@@ -227,8 +306,8 @@ def call_claude(system, messages):
             'X-Title': 'Edara KP Bot',
         },
         json={
-            'model': 'anthropic/claude-haiku-4-5',
-            'max_tokens': 1500,
+            'model': 'anthropic/claude-3.7-sonnet',
+            'max_tokens': 1800,
             'messages': [{'role': 'system', 'content': system}] + messages
         },
         timeout=30
@@ -300,6 +379,9 @@ def webhook():
         original_context = ''
         if reply_text:
             original_context = reply_text
+
+        # Если пользователь прислал многострочный запрос, первая строка обычно служебная ("КП" / "перевод"),
+        # а остальной текст — исходные данные от коллег.
 
         clarification = ''
         send_message(chat_id, 'Считаю ставку и готовлю КП...', reply_to=message_id)
