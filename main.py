@@ -5,26 +5,30 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ── Переменные окружения (задаются в Railway) ──────────────────
-BOT_TOKEN        = os.environ.get('BOT_TOKEN')
-OPENROUTER_KEY   = os.environ.get('OPENROUTER_KEY')
-CHAT_ID          = os.environ.get('CHAT_ID')   # Dream Team group ID
-CNY_RATE         = float(os.environ.get('CNY_RATE', '6.9'))
+BOT_TOKEN      = os.environ.get('BOT_TOKEN')
+OPENROUTER_KEY = os.environ.get('OPENROUTER_KEY')
+CHAT_ID        = os.environ.get('CHAT_ID')
+CNY_RATE       = float(os.environ.get('CNY_RATE', '6.9'))
 
-TELEGRAM_API     = f'https://api.telegram.org/bot{BOT_TOKEN}'
+TELEGRAM_API   = f'https://api.telegram.org/bot{BOT_TOKEN}'
 
-# ── Системный промпт для генерации КП ─────────────────────────
-SYSTEM_PROMPT = f"""Ты — логистический ассистент компании Edara.
-
-ЗАДАЧА: Переведи ответ китайских коллег и составь готовое КП для клиента.
+SYSTEM_PROMPT = f"""Ты — логистический ассистент компании Edara. Переведи ответ китайских коллег и составь КП для клиента.
 
 КУРС CNY/USD: {CNY_RATE}
-МАРЖА LTL/LCL: 150 USD (добавить к ставке коллег)
-МАРЖА FCL: уже включена, передавать как есть
-DTHC через нас: 150 USD (себестоимость 100 + маржа 50)
-Округление: всегда в большую сторону до круглых чисел
 
-КЛИЕНТЫ:
+РАСЧЁТ СТАВКИ:
+- LTL (сборное авто) / LCL (сборное жд): итоговая ставка = загранставка USD + маржа 150 USD + (забор CNY ÷ {CNY_RATE})
+- FCL (полный контейнер): ставка коллег уже включает маржу — передавать как есть
+- DTHC через нас: добавить 150 USD (себестоимость 100 + маржа 50)
+- Все суммы округлять в большую сторону до круглых чисел
+
+ОПРЕДЕЛЕНИЕ ТИПА:
+- 拼箱 / LCL / сборный / сборная жд / 铁路拼箱 → LCL (сборное жд)
+- 散货 / сборное авто / LTL → LTL (сборное авто)  
+- 整箱 / 40HQ / 40HC / 20GP / полный контейнер / FCL → FCL
+- Смотри на контекст из оригинального запроса если он есть
+
+КЛИЕНТЫ И ОБРАЩЕНИЯ:
 - bonafidegrp.ru / Bona → Максим
 - orientlog.ru / Orlan → Никита
 - fs-logistic.ru / FS → Владислав
@@ -40,16 +44,14 @@ DTHC через нас: 150 USD (себестоимость 100 + маржа 50)
 
 По запросу [номер], [товар]:
 
-Маршрут: [город] – [пограничный переход] – [станция прибытия]
+Маршрут: [город отправки] – [пограничный переход] – [станция прибытия]
 ETD: [дата]
 [вес] KG / [CBM] CBM (Расчётный объём: [расч. CBM] CBM)
-Ставка: [сумма] USD
+Ставка: [итоговая сумма с маржой] USD
 
 Примечания:
 1. Расчёт дан для обычного груза без санкционных товаров, при возможности штабелирования. Требуется обязательная проверка кода ТНВЭД перед отправкой.
 2. DTHC не включён — оплачивается получателем напрямую.
-[3. Вывоз с Москвы до [город] не включён в ставку. — если нужно]
-[4. Данная ставка является специальной для этого выхода. — если нужно]
 
 2. LTL/LCL — несколько вариантов:
 [Имя],
@@ -61,7 +63,10 @@ ETD: [дата]
    [вес] KG / [CBM] CBM (Расчётный объём: [расч. CBM] CBM)
    Ставка: [сумма] USD
 
-2) ...
+2) [город] – [переход] – [станция прибытия]
+   ETD: [дата]
+   [вес] KG / [CBM] CBM (Расчётный объём: [расч. CBM] CBM)
+   Ставка: [сумма] USD
 
 Примечания:
 1. Расчёт дан для обычного груза без санкционных товаров, при возможности штабелирования. Требуется обязательная проверка кода ТНВЭД перед отправкой.
@@ -87,7 +92,7 @@ ETD: [дата]
 
 2) ...
 
-5. FCL FOB (с разбивкой):
+5. FCL FOB (с разбивкой FOR + pre carriage):
 [Имя],
 
 предлагаем [N] варианта:
@@ -104,22 +109,23 @@ ETD: [дата]
 К сожалению, по данному запросу вынуждены отказать — [причина].
 
 ПРАВИЛА:
-- Определи тип (LTL/LCL/FCL) из контекста
-- Посчитай итоговую ставку с маржой
-- Если ставка в CNY — переведи по курсу {CNY_RATE} и добавь маржу
-- Если данных не хватает — напиши ⚠️ что нужно уточнить
-- Если ставка специальная — добавь примечание 4
+- Определи тип перевозки из контекста (особенно из оригинального запроса)
+- Для LTL/LCL ОБЯЗАТЕЛЬНО посчитай: загранставка + 150 USD маржа + (забор CNY ÷ {CNY_RATE})
+- Пример расчёта LCL: загран 2271 USD + маржа 150 + забор (1800 CNY ÷ 6.9 = 261 USD) = 2682 USD → округляем → 2700 USD
+- Для FCL ставку коллег передавай как есть без добавления маржи
+- Примечание "специальная ставка" добавляй ТОЛЬКО если коллеги явно написали что ставка специальная
+- Примечание "вывоз с Москвы" добавляй ТОЛЬКО если пункт назначения не Москва
 - БЕЗ закрывающей фразы и подписи
+- Если данных не хватает — напиши ⚠️ что нужно уточнить
 
-ФОРМАТ ОТВЕТА:
+ФОРМАТ ОТВЕТА (строго):
 === ПЕРЕВОД ===
-[краткий перевод ответа коллег — 3-5 строк ключевых данных]
+[краткий перевод: маршрут, ETD, ставка загран, забор, расчёт итога]
 
 === КП ===
-[готовое КП для клиента]"""
+[готовое КП]"""
 
 
-# ── Отправка сообщения в Telegram ─────────────────────────────
 def send_message(chat_id, text, reply_to=None):
     payload = {
         'chat_id': chat_id,
@@ -128,14 +134,16 @@ def send_message(chat_id, text, reply_to=None):
     }
     if reply_to:
         payload['reply_to_message_id'] = reply_to
-    requests.post(f'{TELEGRAM_API}/sendMessage', json=payload)
+    try:
+        requests.post(f'{TELEGRAM_API}/sendMessage', json=payload, timeout=10)
+    except Exception as e:
+        print(f'sendMessage error: {e}')
 
 
-# ── Генерация КП через Claude (OpenRouter) ────────────────────
 def generate_kp(chinese_text, context=''):
     user_content = ''
     if context:
-        user_content += f'КОНТЕКСТ ОРИГИНАЛЬНОГО ЗАПРОСА:\n{context}\n\n'
+        user_content += f'КОНТЕКСТ ОРИГИНАЛЬНОГО ЗАПРОСА КЛИЕНТА:\n{context}\n\n'
     user_content += f'ОТВЕТ ОТ КИТАЙСКИХ КОЛЛЕГ:\n{chinese_text}'
 
     response = requests.post(
@@ -152,13 +160,13 @@ def generate_kp(chinese_text, context=''):
                 {'role': 'system', 'content': SYSTEM_PROMPT},
                 {'role': 'user', 'content': user_content}
             ]
-        }
+        },
+        timeout=30
     )
     data = response.json()
     return data['choices'][0]['message']['content']
 
 
-# ── Webhook endpoint ───────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
@@ -175,18 +183,17 @@ def webhook():
     if chat_id != str(CHAT_ID):
         return jsonify({'ok': True})
 
-    # Проверяем ключевые слова
     lower = text.lower()
     if not (lower.startswith('перевод') or lower.startswith('кп')):
         return jsonify({'ok': True})
 
-    # Извлекаем текст от китайских коллег (всё после первой строки)
+    # Текст от коллег — всё после первой строки
     lines = text.split('\n')
     chinese_text = '\n'.join(lines[1:]).strip()
 
     if not chinese_text:
         send_message(chat_id,
-            '⚠️ Пришли текст от китайских коллег после слова «перевод» или «КП»',
+            '⚠️ Вставь текст от коллег после слова «перевод» или «КП»',
             reply_to=message_id)
         return jsonify({'ok': True})
 
@@ -196,10 +203,8 @@ def webhook():
     if reply and reply.get('text'):
         context = reply['text']
 
-    # Отправляем промежуточное сообщение
-    send_message(chat_id, '⏳ Обрабатываю ответ от коллег...', reply_to=message_id)
+    send_message(chat_id, '⏳ Считаю ставку и готовлю КП...', reply_to=message_id)
 
-    # Генерируем КП
     try:
         result = generate_kp(chinese_text, context)
         send_message(chat_id, '📊 ' + result, reply_to=message_id)
@@ -209,7 +214,6 @@ def webhook():
     return jsonify({'ok': True})
 
 
-# ── Health check ───────────────────────────────────────────────
 @app.route('/', methods=['GET'])
 def index():
     return 'Edara KP Bot is running ✅'
