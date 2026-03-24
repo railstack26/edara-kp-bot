@@ -13,59 +13,50 @@ TELEGRAM_API   = f'https://api.telegram.org/bot{BOT_TOKEN}'
 SYSTEM_PROMPT = """Ты - опытный логист компании Edara. Получаешь ответы от китайских партнёров и составляешь КП для клиентов.
 
 КИТАЙСКИЕ ТЕРМИНЫ:
-- guo wai / 国外 / 国外运费 = загранставка (USD)
-- ti huo fei / 提货费 = забор груза в Китае (CNY)
-- lu xian / 线路 = маршрут
-- ETD / 开船期 = дата отправки
-- LCL / 铁路拼箱 / 拼箱 = сборный жд
-- LTL / 汽车拼箱 = сборное авто
-- FCL / 整箱 / 40HQ / 40HC / 20GP = полный контейнер
-- shan kou / 山口 = переход Маньчжурия
-- guo si / 果斯 = переход Достык
-- man zhou li / 满洲里 = Маньчжурия
-- er lian / 二连浩特 = Эрлянь
-- ji fei / 计费 = расчётный объём
+- 国外 / 国外运费 = загранставка (USD)
+- 提货费 / 国内提货费 = забор груза в Китае (CNY)
+- 线路 = маршрут
+- LCL / 铁路拼箱 / 拼箱 = сборный жд (LCL)
+- 汽车拼箱 / 散货 = сборное авто (LTL)
+- 整箱 / FCL / 40HQ / 40HC / 20GP = полный контейнер (FCL)
+- 山口 / 满洲里 = переход Маньчжурия (ZBK)
+- 果斯 / 多斯特克 = переход Достык
+- 二连浩特 = Эрлянь
+- 计费 = расчётный объём
+- 特价 = специальная ставка
 
 ГОРОДА:
-xi an / 西安 = Сиань
-qing dao / 青岛 = Циндао
-ning bo / 宁波 = Нинбо
-shang hai / 上海 = Шанхай
-guang zhou / 广州 = Гуанчжоу
-mo si ke / 莫斯科 = Москва
-ye ka / 叶卡 = Екатеринбург
-wo er xi nuo / 沃尔西诺 = Ворсино
-xie li / 谢丽 = Селятино
-ming si ke / 明斯克 = Минск
+西安=Сиань, 青岛=Циндао, 宁波=Нинбо, 上海=Шанхай, 广州=Гуанчжоу
+成都=Чэнду, 重庆=Чунцин, 深圳=Шэньчжэнь, 长沙=Чанша
+莫斯科=Москва, 叶卡=Екатеринбург, 沃尔西诺=Ворсино, 谢丽=Селятино, 明斯克=Минск
 
-ОПРЕДЕЛЕНИЕ ТИПА (приоритет - смотри сначала оригинальный запрос):
-- Есть 拼箱 или LCL или "сборный жд" = LCL
-- Есть 汽车 или "сборное авто" или LTL = LTL
-- Есть 整箱 или FCL или 40HQ/40HC/20GP = FCL
-- Есть KG и CBM без типа контейнера = скорее всего LCL
+ОПРЕДЕЛЕНИЕ ТИПА ПЕРЕВОЗКИ:
+1. Смотри оригинальный запрос клиента (если передан в контексте)
+2. В ответе коллег ищи: 拼箱/LCL/铁路拼箱 = LCL; 汽车/LTL = LTL; 整箱/FCL/40HQ = FCL
+3. Есть KG и CBM без типа контейнера = скорее LCL
 
-РАСЧЁТ СТАВКИ:
-Курс: CNY_RATE
+РАСЧЁТ СТАВКИ (ВАЖНО - считать точно!):
 
 LCL и LTL:
-  итого = загранставка(USD) + 150(маржа) + забор(CNY) / CNY_RATE
-  Пример: 2271 + 150 + 1800/6.9 = 2271 + 150 + 261 = 2682 -> округляем вверх -> 2700 USD
+  Итого = загранставка(USD) + 150(маржа Edara) + забор(CNY) / курс_CNY
+  Пример: 国外 2271 USD + маржа 150 + 提货费 1800 CNY / 6.9 = 2271+150+261 = 2682 -> 2700 USD
+
+Если ставка USD/CBM (например 132 USD/CBM):
+  Итого = (ставка USD/CBM * расч.CBM) + bill_charge + маржа 150 + забор(CNY)/курс
+  Пример: 132*7 + 150(bill) + 150(маржа) + 1000/6.9 = 924+150+150+145 = 1369 -> 1400 USD
 
 FCL:
-  ставка от коллег уже включает маржу - передавать как есть, 150 USD НЕ добавлять
+  Ставка от коллег УЖЕ включает маржу - передавать как есть, 150 USD НЕ добавлять
 
 Округление: всегда вверх до ближайших 50 или 100
 
 КЛИЕНТЫ:
-- Pontis -> Сергей
-- BonaFide / Bona -> Максим
-- Orlan -> Никита
-- FS-Logistic / FS -> Владислав
-- Rusmarine -> Дмитрий
-- Vektura -> Александра
-- неизвестен -> [Имя]
+Pontis -> Сергей | BonaFide/Bona -> Максим | Orlan -> Никита
+FS-Logistic/FS -> Владислав | Rusmarine -> Дмитрий | Vektura -> Александра
 
-ШАБЛОН LCL/LTL ОДИН ВАРИАНТ:
+ШАБЛОНЫ КП:
+
+LCL/LTL один вариант:
 [Имя],
 
 По запросу [номер], [товар]:
@@ -73,13 +64,13 @@ FCL:
 Маршрут: [город CN] - [пограничный переход] - [станция RU]
 ETD: [дата]
 [вес] KG / [факт.CBM] CBM (Расчётный объём: [расч.CBM] CBM)
-Ставка: [итого с маржой] USD
+Ставка: [итого] USD
 
 Примечания:
 1. Расчёт дан для обычного груза без санкционных товаров, при возможности штабелирования. Требуется обязательная проверка кода ТНВЭД перед отправкой.
 2. DTHC не включён - оплачивается получателем напрямую.
 
-ШАБЛОН LCL/LTL НЕСКОЛЬКО ВАРИАНТОВ:
+LCL/LTL несколько вариантов:
 [Имя],
 
 предлагаем [N] варианта:
@@ -98,7 +89,7 @@ ETD: [дата]
 1. Расчёт дан для обычного груза без санкционных товаров, при возможности штабелирования. Требуется обязательная проверка кода ТНВЭД перед отправкой.
 2. DTHC не включён - оплачивается получателем напрямую.
 
-ШАБЛОН FCL ОДИН ВАРИАНТ:
+FCL один вариант:
 [Имя],
 
 По запросу [номер], [товар]:
@@ -107,7 +98,7 @@ ETD: [дата]
 ETD: [дата]
 Ставка: [сумма] USD / [тип контейнера]
 
-ШАБЛОН FCL НЕСКОЛЬКО ВАРИАНТОВ:
+FCL несколько вариантов:
 [Имя],
 
 предлагаем [N] варианта:
@@ -120,7 +111,7 @@ ETD: [дата]
    ETD: [дата]
    Ставка: [сумма] USD / [тип контейнера]
 
-ШАБЛОН FCL FOB (разбивка FOR + pre carriage):
+FCL FOB (разбивка FOR + pre carriage):
 [Имя],
 
 предлагаем [N] варианта:
@@ -131,32 +122,38 @@ ETD: [дата]
    Pre carriage [город] - [станция]: [сумма] USD
    Итого EXW: [сумма] USD / [тип]
 
-ШАБЛОН ОТКАЗ:
+Отказ:
 [Имя],
 
 К сожалению, по данному запросу вынуждены отказать - [причина].
 
+ДОПОЛНИТЕЛЬНЫЕ ПРИМЕЧАНИЯ (только если применимо):
+- Примечание 3: "Вывоз с Москвы до [город] не включён." - ТОЛЬКО если пункт НЕ Москва
+- Примечание 4: "Данная ставка является специальной." - ТОЛЬКО если коллеги написали 特价
+
 ПРАВИЛА:
-1. Маршрут пиши: Город отправки - Пограничный переход - Станция прибытия
-   Например: Сиань - Маньчжурия - Москва (ЗБК)
-2. Примечание 3 "Вывоз с Москвы до [город]" - ТОЛЬКО если пункт НЕ Москва
-3. Примечание 4 "Специальная ставка" - ТОЛЬКО если коллеги явно написали об этом
-4. Не добавляй лишних примечаний от себя
-5. БЕЗ закрывающей фразы и подписи
-6. Если данных не хватает - пиши что уточнить
+- БЕЗ закрывающей фразы и подписи
+- Маршрут: Город отправки - Пограничный переход - Станция прибытия
+- Если не хватает данных для расчёта (нет CBM или веса) - запроси их кратко
+- Если данные уточнены в reply - используй их и составь КП без повторных вопросов
 
 ФОРМАТ ОТВЕТА:
 === ПЕРЕВОД ===
 Тип: [LCL/LTL/FCL]
 Маршрут: [...]
 ETD: [...]
-Загранставка: [...] USD
-Забор: [...] CNY = [...] USD  
-Маржа: 150 USD
-ИТОГО: [...] -> [округлено] USD
+Расчёт: загран [...] + маржа 150 + забор [...] = итого [...]
 
 === КП ===
-[готовое КП по шаблону]"""
+[готовое КП по шаблону]
+
+ЕСЛИ НЕ ХВАТАЕТ ДАННЫХ:
+=== ПЕРЕВОД ===
+[что понял]
+
+=== УТОЧНИ ===
+- [конкретный вопрос 1]
+- [конкретный вопрос 2]"""
 
 
 def send_message(chat_id, text, reply_to=None):
@@ -169,14 +166,35 @@ def send_message(chat_id, text, reply_to=None):
         print(f'sendMessage error: {e}')
 
 
-def generate_kp(chinese_text, context=''):
-    prompt = SYSTEM_PROMPT.replace('CNY_RATE', str(CNY_RATE))
-    
-    user_content = ''
-    if context:
-        user_content += f'КОНТЕКСТ ОРИГИНАЛЬНОГО ЗАПРОСА:\n{context}\n\n'
-    user_content += f'ОТВЕТ ОТ КИТАЙСКИХ КОЛЛЕГ:\n{chinese_text}'
+def build_messages(chinese_text, original_context='', clarification=''):
+    """Строит историю сообщений для Claude с учётом диалога."""
+    system = SYSTEM_PROMPT.replace('курс_CNY', str(CNY_RATE))
 
+    # Первое сообщение пользователя
+    user_msg = ''
+    if original_context:
+        user_msg += f'КОНТЕКСТ ЗАПРОСА КЛИЕНТА:\n{original_context}\n\n'
+    user_msg += f'ОТВЕТ ОТ КИТАЙСКИХ КОЛЛЕГ:\n{chinese_text}'
+
+    messages = [{'role': 'user', 'content': user_msg}]
+
+    # Если есть уточнение (reply на вопрос бота) - добавляем как продолжение диалога
+    if clarification:
+        # Добавляем ответ ассистента (он попросил уточнить)
+        messages.append({
+            'role': 'assistant',
+            'content': '=== УТОЧНИ ===\nТребуются дополнительные данные для расчёта.'
+        })
+        # Добавляем уточнение пользователя
+        messages.append({
+            'role': 'user',
+            'content': f'Уточнение: {clarification}\n\nТеперь составь КП.'
+        })
+
+    return system, messages
+
+
+def call_claude(system, messages):
     response = requests.post(
         'https://openrouter.ai/api/v1/chat/completions',
         headers={
@@ -187,10 +205,7 @@ def generate_kp(chinese_text, context=''):
         json={
             'model': 'anthropic/claude-haiku-4-5',
             'max_tokens': 1500,
-            'messages': [
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': user_content}
-            ]
+            'messages': [{'role': 'system', 'content': system}] + messages
         },
         timeout=30
     )
@@ -213,27 +228,61 @@ def webhook():
         return jsonify({'ok': True})
 
     lower = text.lower()
-    if not (lower.startswith('перевод') or lower.startswith('кп')):
+    is_translate = lower.startswith('перевод') or lower.startswith('кп')
+
+    # Проверяем - это reply на предыдущий вопрос бота?
+    reply = message.get('reply_to_message', {})
+    reply_text = reply.get('text', '') if reply else ''
+    is_reply_to_bot = (
+        reply and
+        reply.get('from', {}).get('is_bot', False) and
+        '=== УТОЧНИ ===' in reply_text
+    )
+
+    if not is_translate and not is_reply_to_bot:
         return jsonify({'ok': True})
 
-    lines = text.split('\n')
-    chinese_text = '\n'.join(lines[1:]).strip()
+    # Если это reply на вопрос бота — извлекаем контекст из цепочки
+    if is_reply_to_bot and not is_translate:
+        # Ищем оригинальный текст от коллег в сообщении на которое ответил бот
+        original_bot_reply = reply.get('reply_to_message', {})
+        original_user_msg  = original_bot_reply.get('text', '') if original_bot_reply else ''
 
-    if not chinese_text:
-        send_message(chat_id,
-            'Вставь текст от коллег после слова перевод или КП',
-            reply_to=message_id)
-        return jsonify({'ok': True})
+        # Извлекаем текст коллег из оригинального сообщения
+        lines = original_user_msg.split('\n')
+        chinese_text = '\n'.join(lines[1:]).strip() if lines else original_user_msg
 
-    context = ''
-    reply = message.get('reply_to_message')
-    if reply and reply.get('text'):
-        context = reply['text']
+        # Контекст из ещё более раннего сообщения
+        original_context = ''
+        if original_bot_reply and original_bot_reply.get('reply_to_message'):
+            prev = original_bot_reply['reply_to_message']
+            original_context = prev.get('text', '')
 
-    send_message(chat_id, 'Считаю ставку и готовлю КП...', reply_to=message_id)
+        clarification = text
+        send_message(chat_id, 'Пересчитываю с уточнениями...', reply_to=message_id)
+
+    else:
+        # Новый запрос перевод/КП
+        lines = text.split('\n')
+        chinese_text = '\n'.join(lines[1:]).strip()
+
+        if not chinese_text:
+            send_message(chat_id,
+                'Вставь текст от коллег после слова перевод или КП',
+                reply_to=message_id)
+            return jsonify({'ok': True})
+
+        # Контекст из оригинального запроса (если reply на сообщение бота о новом запросе)
+        original_context = ''
+        if reply_text:
+            original_context = reply_text
+
+        clarification = ''
+        send_message(chat_id, 'Считаю ставку и готовлю КП...', reply_to=message_id)
 
     try:
-        result = generate_kp(chinese_text, context)
+        system, messages = build_messages(chinese_text, original_context, clarification)
+        result = call_claude(system, messages)
         send_message(chat_id, result, reply_to=message_id)
     except Exception as e:
         send_message(chat_id, f'Ошибка: {str(e)}', reply_to=message_id)
