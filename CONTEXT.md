@@ -22,7 +22,7 @@
 | Компонент | Значение |
 |-----------|----------|
 | Telegram бот | @EdaraRateBot |
-| BOT_TOKEN | `8374192718:AAHGHoyqjgbwyxCVhP1aZvh0pXpskVgFTX8` |
+| BOT_TOKEN | `<см. Railway Variables → BOT_TOKEN>` |
 | CHAT_ID | `-5223680248` |
 | OpenRouter key | в CONFIG объекте скрипта |
 | LLM модель | `anthropic/claude-haiku-4-5` |
@@ -91,8 +91,8 @@ Package size: [габариты] — если есть
 
 ### Railway переменные окружения
 ```
-BOT_TOKEN       = 8374192718:AAHGHoyqjgbwyxCVhP1aZvh0pXpskVgFTX8
-OPENROUTER_KEY  = sk-or-v1-...
+BOT_TOKEN       = <см. Railway Variables → BOT_TOKEN>
+OPENROUTER_KEY  = <см. Railway Variables → OPENROUTER_KEY>
 CHAT_ID         = -5223680248
 CNY_RATE        = 6.9
 PORT            = (Railway задаёт автоматически)
